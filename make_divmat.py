@@ -6,6 +6,11 @@ import msprime
 import tskit
 import numpy as np
 
+# TODO: instead of the stack,
+# make a list (of length equal to the number of nodes)
+# of lists of (other node, z) pairs
+# (that must be coordinated between pairs)
+
 
 def assert_dicts_close(d1, d2):
     if not set(d1.keys()) == set(d2.keys()):
@@ -34,13 +39,14 @@ class DivergenceMatrix:
         sequence_length,
     ):
         # Quintuply linked tree
-        self.parent = np.full(num_nodes, -1, dtype=np.int32)
-        self.left_sib = np.full(num_nodes, -1, dtype=np.int32)
-        self.right_sib = np.full(num_nodes, -1, dtype=np.int32)
-        self.left_child = np.full(num_nodes, -1, dtype=np.int32)
-        self.right_child = np.full(num_nodes, -1, dtype=np.int32)
+        self.parent = np.full(num_nodes + 1, -1, dtype=np.int32)
+        self.left_sib = np.full(num_nodes + 1, -1, dtype=np.int32)
+        self.right_sib = np.full(num_nodes + 1, -1, dtype=np.int32)
+        self.left_child = np.full(num_nodes + 1, -1, dtype=np.int32)
+        self.right_child = np.full(num_nodes + 1, -1, dtype=np.int32)
         # Sample lists refer to sample *index*
-        self.sample_index_map = np.full(num_nodes, -1, dtype=np.int32)
+        self.sample_index_map = np.full(num_nodes + 1, -1, dtype=np.int32)
+        self.num_samples = np.full(num_nodes + 1, 0, dtype=np.int32)
         # Edges and indexes
         self.edges_left = edges_left
         self.edges_right = edges_right
@@ -52,32 +58,44 @@ class DivergenceMatrix:
         self.nodes_time = nodes_time
         self.samples = samples
         self.position = 0
+        self.virtual_root = num_nodes
 
         n = samples.shape[0]
         for j in range(n):
             u = samples[j]
             self.sample_index_map[u] = j
+            self.num_samples[u] = 1
+            self.insert_root(u)
 
         self.stack = {}
-        self.x = np.zeros(nodes_time.shape[0])
+        self.x = np.zeros(num_nodes + 1)
 
     def print_state(self, msg=""):
         print(f"..........{msg}................")
         print(f"position = {self.position}")
         for j in range(len(self.parent)):
+            st = "NaN" if j == self.virtual_root else f"{self.nodes_time[j]}"
             pt = "NaN" if self.parent[j] == tskit.NULL else f"{self.nodes_time[self.parent[j]]}"
             print(f"node {j} -> {self.parent[j]}: "
-                  f"z = ({pt} - {self.nodes_time[j]})"
+                  f"ns = {self.num_samples[j]}, "
+                  f"z = ({pt} - {st})"
                   f" * ({self.position} - {self.x[j]})"
                   f" = {self.get_z(j)}")
             for k in self.stack_pairs(j):
                 print(f"   {k}: {self.stack[k]}")
+        print(f"Virtual root: {self.virtual_root}")
+        roots = []
+        u = self.left_child[self.virtual_root]
+        while u != tskit.NULL:
+            roots.append(u)
+            u = self.right_sib[u]
+        print("Roots:", roots)
         print("Current state:")
         state = self.current_state()
         for k in state:
             print(f"   {k}: {state[k]}")
 
-    def remove_edge(self, p, c):
+    def remove_branch(self, p, c):
         lsib = self.left_sib[c]
         rsib = self.right_sib[c]
         if lsib == -1:
@@ -92,8 +110,7 @@ class DivergenceMatrix:
         self.left_sib[c] = -1
         self.right_sib[c] = -1
 
-    def insert_edge(self, p, c):
-        assert self.parent[c] == -1, "contradictory edges"
+    def insert_branch(self, p, c):
         self.parent[c] = p
         u = self.right_child[p]
         if u == -1:
@@ -105,6 +122,44 @@ class DivergenceMatrix:
             self.left_sib[c] = u
             self.right_sib[c] = -1
         self.right_child[p] = c
+
+    def remove_root(self, root):
+        self.remove_branch(self.virtual_root, root)
+
+    def insert_root(self, root):
+        self.insert_branch(self.virtual_root, root)
+        self.parent[root] = -1
+
+    def remove_edge(self, p, c):
+        assert p != -1
+        self.remove_branch(p, c)
+        # check for root changes
+        u = p
+        while u != tskit.NULL:
+            path_end = u
+            path_end_was_root = (self.num_samples[u] > 0)
+            self.num_samples[u] -= self.num_samples[c]
+            u = self.parent[u]
+        if path_end_was_root and (self.num_samples[path_end] == 0):
+            self.remove_root(path_end)
+        if self.num_samples[c] > 0:
+            self.insert_root(c)
+
+    def insert_edge(self, p, c):
+        assert p != -1
+        assert self.parent[c] == -1, "contradictory edges"
+        # check for root changes
+        u = p
+        while u != tskit.NULL:
+            path_end = u
+            path_end_was_root = (self.num_samples[u] > 0)
+            self.num_samples[u] += self.num_samples[c]
+            u = self.parent[u]
+        if self.num_samples[c] > 0:
+            self.remove_root(c)
+        if (self.num_samples[path_end] > 0) and not path_end_was_root:
+            self.insert_root(path_end)
+        self.insert_branch(p, c)
 
     def stack_pairs(self, a):
         for (u, v) in self.stack:
@@ -130,14 +185,11 @@ class DivergenceMatrix:
             n = self.parent[n]
 
     def get_z(self, u):
-        if self.parent[u] != tskit.NULL:
-            out = (
+        p = self.parent[u]
+        return 0 if p == tskit.NULL else (
                 (self.nodes_time[self.parent[u]] - self.nodes_time[u])
                 * (self.position - self.x[u])
-            )
-        else:
-            out = 0
-        return out
+        )
 
     def mrca(self, a, b):
         # just used for `current_state`
@@ -193,52 +245,71 @@ class DivergenceMatrix:
     def clear_edge(self, n):
         """
         Push all contributions from the edge above n into the stack,
-        which will add to stack[(n, u)] for all u in the sibs of n
-        BUT NOT the path from n to the root.
+        which will add to stack[(n, u)] for all u in the sibs of n.
+        This does NOT go up the path from n to the root,
+        so it only works if we've already cleared all those parental
+        nodes (so all connections to higher-up sibs are in the stack).
         """
         # self.print_state(f'before edge {n}')
-        print("edge", n)
-        z = self.get_z(n)
         p = self.parent[n]
+        if p == tskit.NULL:
+            p = self.virtual_root
+            z = 0  # <- it's important to have connections with z=0!
+        else:
+            z = self.get_z(n)
         # should have already cleared the stack
         assert len(list(self.stack_pairs(p))) == 0
         u = self.left_child[p]
         while u != tskit.NULL:
             if u != n:
-                print(f"adding {z} to {(u, n)}")
+                # print(f"adding {z} to {(u, n)}")
                 self.add_to_stack((u, n), z)
             u = self.right_sib[u]
         self.x[n] = self.position
         # self.print_state(f'after edge {n}')
 
 
-    def clear_node(self, n):
+    def clear_edges(self, n):
         """
         Push down references in the stack from n to other nodes
         to the children of n.
         """
         # this operation should not change the current output
         before_state = self.current_state()
-        self.print_state(f'before node {n}')
-        print("stack", n)
+        # self.print_state(f'before clear edges {n}')
+        # print("stack", n)
+        # all these stack pairs should be references to siblings
+        # of the path up to the root
         for u, v in list(self.stack_pairs(n)):
             z = self.stack[(u, v)]
             del self.stack[(u ,v)]
             w = v if u == n else u
             c = self.left_child[n]
             while c != tskit.NULL:
-                print(f"adding {z} to {(w, c)}")
-                self.add_to_stack((w, c), z)
+                zc = self.get_z(c)
+                # print(f"adding {z}+{zc}={z+zc} to {(w, c)}")
+                self.add_to_stack((w, c), z + zc)
                 c = self.right_sib[c]
-        self.print_state(f'after stack {n}')
+        # self.print_state(f'after stack {n}')
         c = self.left_child[n]
         while c != tskit.NULL:
-            print(f'clearing {c}')
+            # print(f'clearing {c}')
             self.clear_edge(c)
             c = self.right_sib[c]
         after_state = self.current_state()
-        self.print_state(f'after node {n}')
+        # self.print_state(f'after clear edges {n}')
         assert_dicts_close(before_state, after_state)
+
+    def clear_node_stack(self, n):
+        for u, v in list(self.stack_pairs(n)):
+            z = self.stack[(u, v)]
+            del self.stack[(u ,v)]
+            w = v if u == n else u
+            c = self.left_child[n]
+            while c != tskit.NULL:
+                # print(f"adding {z} to {(w, c)}")
+                self.add_to_stack((w, c), z)
+                c = self.right_sib[c]
 
     def clear_spine(self, n):
         """
@@ -247,19 +318,27 @@ class DivergenceMatrix:
         and pushing all stack references to their children.
         """
         # this operation should not change the current output
-        self.print_state(f'before spine {n}')
+        # self.print_state(f'before spine {n}')
         before_state = self.current_state()
         spine = []
         p = n
         while p != tskit.NULL:
             spine.append(p)
             p = self.parent[p]
+        spine.append(self.virtual_root)
         spine.reverse()
+        # first clear existing stack entries
         for p in spine:
-            self.clear_node(p)
+            self.clear_node_stack(p)
+        # then go through and make new entries for the edges;
+        # this requires a different update step for the stack
+        # entries made to propagate edges down the spine,
+        # which is why previous ones had to be cleared first
+        for p in spine:
+            self.clear_edges(p)
         self.verify_zero_spine(n)
         after_state = self.current_state()
-        self.print_state(f'after spine {n}')
+        # self.print_state(f'after spine {n}')
         assert_dicts_close(before_state, after_state)
 
     def run(self):
@@ -328,13 +407,13 @@ def lib_divergence_matrix(ts, mode="branch"):
     return out
 
 def verify():
-    seed = 126
+    seed = 123
     ts = msprime.sim_ancestry(
-            3,
+            10,
             ploidy=1,
             population_size=10,
             sequence_length=100,
-            recombination_rate=0.001,
+            recombination_rate=0.01,
             random_seed=seed
     )
     D1 = lib_divergence_matrix(ts, mode="branch")
