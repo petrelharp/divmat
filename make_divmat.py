@@ -89,8 +89,9 @@ class DivergenceMatrix:
             self.num_samples[u] = 1
             self.insert_root(u)
 
-        self.stack_u = [[] for _ in range(num_nodes + 1)]
-        self.stack_z = [[] for _ in range(num_nodes + 1)]
+        # this looks ugly for numba
+        self.stack_u = [[np.int32(x) for x in range(0)] for _ in range(num_nodes + 1)]
+        self.stack_z = [[np.float64(x) for x in range(0)] for _ in range(num_nodes + 1)]
         self.x = np.zeros(num_nodes + 1)
 
     def print_state(self, msg=""):
