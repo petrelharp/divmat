@@ -67,13 +67,14 @@ class DivergenceMatrix:
             self.num_samples[u] = 1
             self.insert_root(u)
 
-        self.stack = {}
+        self.stack = [[] for _ in range(num_nodes + 1)]
         self.x = np.zeros(num_nodes + 1)
 
     def print_state(self, msg=""):
+        num_nodes = len(self.parent)
         print(f"..........{msg}................")
         print(f"position = {self.position}")
-        for j in range(len(self.parent)):
+        for j in range(num_nodes):
             st = "NaN" if j == self.virtual_root else f"{self.nodes_time[j]}"
             pt = "NaN" if self.parent[j] == tskit.NULL else f"{self.nodes_time[self.parent[j]]}"
             print(f"node {j} -> {self.parent[j]}: "
@@ -81,8 +82,8 @@ class DivergenceMatrix:
                   f"z = ({pt} - {st})"
                   f" * ({self.position} - {self.x[j]})"
                   f" = {self.get_z(j)}")
-            for k in self.stack_pairs(j):
-                print(f"   {k}: {self.stack[k]}")
+            for u, z in self.stack[j]:
+                print(f"   {(j, u)}: {z}")
         print(f"Virtual root: {self.virtual_root}")
         roots = []
         u = self.left_child[self.virtual_root]
@@ -161,25 +162,36 @@ class DivergenceMatrix:
             self.insert_root(path_end)
         self.insert_branch(p, c)
 
-    def stack_pairs(self, a):
-        for (u, v) in self.stack:
-            if a == u or a == v:
-                yield (u, v)
+    def _add_to_stack(self, u, v, z):
+        ustack = self.stack[u]
+        append = True
+        for j in range(len(ustack)):
+            if ustack[j][0] == v:
+                ustack[j][1] += z
+                append = False
+        if append:
+            ustack.append([v, z])
 
-    def add_to_stack(self, uv, z):
-        k = tuple(sorted(uv))
-        if k not in self.stack:
-            self.stack[k] = 0
-        self.stack[k] += z
+    def add_to_stack(self, u, v, z):
+        self._add_to_stack(u, v, z)
+        self._add_to_stack(v, u, z)
+
+    def empty_stack(self, n):
+        for w, _ in self.stack[n]:
+            wstack = self.stack[w]
+            for j in reversed(range(len(wstack))):
+                u, _ = wstack[j]
+                if u == n:
+                    del wstack[j]
+        self.stack[n].clear()
 
     def verify_zero_spine(self, n):
         """
         Verify that there are no contributions along the path
         from n up to the root. (should be true after clear_spine)
         """
-        for k in self.stack:
-            if n in k:
-                assert self.stack[k] == 0
+        for _, z in self.stack[n]:
+            assert z == 0
         while n != tskit.NULL:
             assert self.parent[n] == tskit.NULL or self.x[n] == self.position
             n = self.parent[n]
@@ -233,10 +245,10 @@ class DivergenceMatrix:
                     while pa != m:
                         pb = b
                         while pb != m:
-                            pk = tuple(sorted([pa, pb]))
-                            if pk in self.stack:
-                                if verbose: print("stack:", k, pk, self.stack[pk])
-                                out[k] += self.stack[pk]
+                            for w, z in self.stack[pa]:
+                                if w == pb:
+                                    if verbose: print("stack:", k, (pa, pb), z)
+                                    out[k] += z
                             pb = self.parent[pb]
                         pa = self.parent[pa]
         if verbose: print("---------------")
@@ -258,12 +270,12 @@ class DivergenceMatrix:
         else:
             z = self.get_z(n)
         # should have already cleared the stack
-        assert len(list(self.stack_pairs(p))) == 0
+        assert len(self.stack[p]) == 0
         u = self.left_child[p]
         while u != tskit.NULL:
             if u != n:
                 # print(f"adding {z} to {(u, n)}")
-                self.add_to_stack((u, n), z)
+                self.add_to_stack(u, n, z)
             u = self.right_sib[u]
         self.x[n] = self.position
         # self.print_state(f'after edge {n}')
@@ -280,16 +292,14 @@ class DivergenceMatrix:
         # print("stack", n)
         # all these stack pairs should be references to siblings
         # of the path up to the root
-        for u, v in list(self.stack_pairs(n)):
-            z = self.stack[(u, v)]
-            del self.stack[(u ,v)]
-            w = v if u == n else u
+        for w, z in self.stack[n]:
             c = self.left_child[n]
             while c != tskit.NULL:
                 zc = self.get_z(c)
                 # print(f"adding {z}+{zc}={z+zc} to {(w, c)}")
-                self.add_to_stack((w, c), z + zc)
+                self.add_to_stack(w, c, z + zc)
                 c = self.right_sib[c]
+        self.empty_stack(n)
         # self.print_state(f'after stack {n}')
         c = self.left_child[n]
         while c != tskit.NULL:
@@ -301,15 +311,13 @@ class DivergenceMatrix:
         assert_dicts_close(before_state, after_state)
 
     def clear_node_stack(self, n):
-        for u, v in list(self.stack_pairs(n)):
-            z = self.stack[(u, v)]
-            del self.stack[(u ,v)]
-            w = v if u == n else u
+        for w, z in self.stack[n]:
             c = self.left_child[n]
             while c != tskit.NULL:
                 # print(f"adding {z} to {(w, c)}")
-                self.add_to_stack((w, c), z)
+                self.add_to_stack(w, c, z)
                 c = self.right_sib[c]
+        self.empty_stack(n)
 
     def clear_spine(self, n):
         """
@@ -383,7 +391,15 @@ class DivergenceMatrix:
                 right = min(right, edges_right[out_order[k]])
             left = right
         # self.print_state("done") ##
-        return self.stack
+        out = {}
+        for u, ustack in enumerate(self.stack):
+            for v, z in ustack:
+                k = tuple(sorted((u, v)))
+                if k in out:
+                    assert out[k] == z
+                else:
+                    out[k] = z
+        return out
 
 
 def divergence_matrix(ts):
