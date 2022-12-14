@@ -169,7 +169,6 @@ class DivergenceMatrix:
         self.insert_branch(p, c)
 
     def _add_to_stack(self, u, v, z):
-        self.num_additions[self.tn] += 1
         ustack_u = self.stack_u[u]
         ustack_z = self.stack_z[u]
         append = True
@@ -182,6 +181,8 @@ class DivergenceMatrix:
             ustack_z.append(z)
 
     def add_to_stack(self, u, v, z):
+        if self.num_trees > 0:
+            self.num_additions[self.tn] += 1 
         self._add_to_stack(u, v, z)
         self._add_to_stack(v, u, z)
 
@@ -191,7 +192,8 @@ class DivergenceMatrix:
             for j in range(len(wstack_u) - 1, -1, -1):
                 u = wstack_u[j]
                 if u == n:
-                    self.num_deletions[self.tn] += 1
+                    if self.num_trees > 0:
+                        self.num_deletions[self.tn] += 1
                     del wstack_u[j]
                     del self.stack_z[w][j]
                     break
@@ -396,11 +398,11 @@ class DivergenceMatrix:
                 right = min(right, edges_right[out_order[k]])
             left = right
             # stack recording
-            self.tn += 1
             if self.num_trees > 0:
                 self.stack_history[self.tn, :] = [
                     len(u) for u in self.stack_u
                 ]
+            self.tn += 1
         # self.print_state("done") ##
         out = np.zeros((len(self.samples), len(self.samples)))
         for i in self.samples:
@@ -424,6 +426,19 @@ def divergence_matrix(ts):
     )
     return dm.run()
 
+
+def lib_divergence_matrix(ts, mode="branch"):
+    out = ts.divergence(
+            [[u] for u in ts.samples()],
+            [(i, j) for i in range(ts.num_samples) for j in range(ts.num_samples)],
+            mode=mode,
+            span_normalise=False
+    ).reshape((ts.num_samples, ts.num_samples))
+    for i in range(ts.num_samples):
+        out[i, i] = 0
+    return out
+
+
 def get_stack_history(ts):
     dm = DivergenceMatrix(
         ts.num_nodes,
@@ -441,6 +456,7 @@ def get_stack_history(ts):
     _ = dm.run()
     return dm
 
+
 def verify():
     for seed in range(1, 10):
         ts = msprime.sim_ancestry(
@@ -453,11 +469,6 @@ def verify():
         )
         D1 = lib_divergence_matrix(ts, mode="branch")
         D2 = divergence_matrix(ts)
-        print(f"========{ts.num_trees}=============")
-        for i in range(D2.shape[0]):
-            for j in range(D2.shape[1]):
-                    print(i, j, D2[i, j])
-        print("=====================")
         assert np.allclose(D1, D2)
 
 
@@ -492,5 +503,5 @@ def plot_stack():
 if __name__ == "__main__":
 
     np.set_printoptions(linewidth=500, precision=4)
-    plot_stack(sys.argv[1])
-    # verify()
+    verify()
+    plot_stack()

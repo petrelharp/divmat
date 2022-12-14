@@ -45,7 +45,7 @@ spec = [
 ]
 
 
-@numba.experimental.jitclass(spec)
+# @numba.experimental.jitclass(spec)
 class DivergenceMatrix:
     def __init__(
         self,
