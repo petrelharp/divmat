@@ -67,7 +67,6 @@ class DivergenceMatrix:
         self.left_child = np.full(num_nodes + 1, -1, dtype=np.int32)
         self.right_child = np.full(num_nodes + 1, -1, dtype=np.int32)
         # Sample lists refer to sample *index*
-        self.sample_index_map = np.full(num_nodes + 1, -1, dtype=np.int32)
         self.num_samples = np.full(num_nodes + 1, 0, dtype=np.int32)
         # Edges and indexes
         self.edges_left = edges_left
@@ -85,7 +84,6 @@ class DivergenceMatrix:
         n = samples.shape[0]
         for j in range(n):
             u = samples[j]
-            self.sample_index_map[u] = j
             self.num_samples[u] = 1
             self.insert_root(u)
 
@@ -99,7 +97,7 @@ class DivergenceMatrix:
         print(f"..........{msg}................")
         print(f"position = {self.position}")
         for j in range(num_nodes):
-            st = "NaN" if j == self.virtual_root else f"{self.nodes_time[j]}"
+            st = "NaN" if j >= self.virtual_root else f"{self.nodes_time[j]}"
             pt = "NaN" if self.parent[j] == tskit.NULL else f"{self.nodes_time[self.parent[j]]}"
             print(f"node {j} -> {self.parent[j]}: "
                   f"ns = {self.num_samples[j]}, "
@@ -186,6 +184,8 @@ class DivergenceMatrix:
             self.insert_root(path_end)
         self.insert_branch(p, c)
 
+    ######### begin stack stuff
+
     def _add_to_stack(self, u, v, z):
         ustack_u = self.stack_u[u]
         ustack_z = self.stack_z[u]
@@ -199,6 +199,7 @@ class DivergenceMatrix:
             ustack_z.append(z)
 
     def add_to_stack(self, u, v, z):
+        # note: having stack entries that are zero is important sometimes
         self._add_to_stack(u, v, z)
         self._add_to_stack(v, u, z)
 
@@ -399,7 +400,8 @@ class DivergenceMatrix:
             while j < M and edges_left[in_order[j]] == left:
                 p = edges_parent[in_order[j]]
                 c = edges_child[in_order[j]]
-                self.clear_spine(p)
+                if self.position > 0:
+                    self.clear_spine(p)
                 assert self.parent[p] == tskit.NULL or self.x[p] == self.position
                 self.insert_edge(p, c)
                 self.x[c] = self.position

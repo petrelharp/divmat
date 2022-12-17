@@ -301,8 +301,6 @@ class DivergenceMatrix:
         """
         # this operation should not change the current output
         # before_state = self.current_state()
-        # all these stack pairs should be references to siblings
-        # of the path up to the root
         for w, z in zip(self.stack_u[n], self.stack_z[n]):
             c = self.left_child[n]
             while c != tskit.NULL:
@@ -385,7 +383,8 @@ class DivergenceMatrix:
             while j < M and edges_left[in_order[j]] == left:
                 p = edges_parent[in_order[j]]
                 c = edges_child[in_order[j]]
-                self.clear_spine(p)
+                if self.position > 0:
+                    self.clear_spine(p)
                 assert self.parent[p] == tskit.NULL or self.x[p] == self.position
                 self.insert_edge(p, c)
                 self.x[c] = self.position
@@ -497,7 +496,7 @@ def plot_stack():
     ax2.set_xlabel("tree number")
     ax2.set_ylabel("number of operations")
     ax2.legend()
-    fig.savefig(f"stack_profile_{ts.num_trees}_{ts.num_samples}.png", bbox_inches = "tight")
+    fig.savefig(f"stack_profile_{ts.num_trees}_{ts.num_samples}_{seed}.png", bbox_inches = "tight")
 
 
 if __name__ == "__main__":
