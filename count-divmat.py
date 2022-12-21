@@ -185,7 +185,7 @@ class DivergenceMatrix:
     def add_to_stack(self, u, v, z):
         # note: having stack entries that are zero is important sometimes
         if self.num_trees > 0:
-            self.num_additions[self.tn] += 1 
+            self.num_additions[self.tn] += 1
         self._add_to_stack(u, v, z)
         self._add_to_stack(v, u, z)
 
@@ -518,8 +518,39 @@ def plot_stack():
     fig.savefig(f"stack_profile_{ts.num_trees}_{ts.num_samples}_{seed}.png", bbox_inches = "tight")
 
 
+def plot_stack_growth():
+    seed = 123
+    nvals = np.linspace(4, 104, 21).astype("int")
+    total_ops = np.zeros(len(nvals))
+    max_stack = np.zeros(len(nvals))
+    for j, n in enumerate(nvals):
+        ts = msprime.sim_ancestry(
+            n,
+            ploidy=1,
+            population_size=10**4,
+            sequence_length=1e5,
+            recombination_rate=1e-8,
+            random_seed=seed,
+        )
+        dm = get_stack_history(ts)
+        total_ops[j] = np.sum(dm.num_additions) + np.sum(dm.num_deletions)
+        max_stack[j] = np.max(np.sum(dm.stack_history, axis=1))
+    fig, (ax0, ax1) = plt.subplots(2, 1, figsize=(12,12))
+    ax0.scatter(nvals, total_ops, label="total operations")
+    ax0.set_xlabel("number of samples")
+    ax0.set_ylabel("total number of operations")
+    ax0.set_title("total number of operations")
+    ax1.scatter(nvals, max_stack, label="max stack size")
+    ax1.set_xlabel("number of samples")
+    ax1.set_ylabel("max stack size")
+    ax1.set_title("max stack size")
+    fig.savefig(f"stack_history.png", bbox_inches = "tight")
+
+
+
 if __name__ == "__main__":
 
     np.set_printoptions(linewidth=500, precision=4)
     verify()
     plot_stack()
+    plot_stack_growth()
