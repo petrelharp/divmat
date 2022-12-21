@@ -522,28 +522,43 @@ def plot_stack_growth():
     seed = 123
     nvals = np.linspace(4, 104, 21).astype("int")
     total_ops = np.zeros(len(nvals))
+    treewise_ops = np.zeros(len(nvals))
     max_stack = np.zeros(len(nvals))
+    num_trees = np.zeros(len(nvals))
     for j, n in enumerate(nvals):
         ts = msprime.sim_ancestry(
             n,
             ploidy=1,
             population_size=10**4,
-            sequence_length=1e5,
+            sequence_length=1e7,
             recombination_rate=1e-8,
             random_seed=seed,
         )
+        num_trees[j] = ts.num_trees
         dm = get_stack_history(ts)
         total_ops[j] = np.sum(dm.num_additions) + np.sum(dm.num_deletions)
         max_stack[j] = np.max(np.sum(dm.stack_history, axis=1))
-    fig, (ax0, ax1) = plt.subplots(2, 1, figsize=(12,12))
-    ax0.scatter(nvals, total_ops, label="total operations")
+        for t in ts.trees():
+            for n in t.nodes():
+                treewise_ops[j] += t.num_samples(n)
+    fig, (ax0, ax1, ax2) = plt.subplots(3, 1, figsize=(12,12))
+    ax0.scatter(nvals, total_ops, label=f"total operations")
+    ax0.scatter(nvals, treewise_ops, label="treewise")
     ax0.set_xlabel("number of samples")
     ax0.set_ylabel("total number of operations")
     ax0.set_title("total number of operations")
-    ax1.scatter(nvals, max_stack, label="max stack size")
-    ax1.set_xlabel("number of samples")
-    ax1.set_ylabel("max stack size")
-    ax1.set_title("max stack size")
+    ax0.legend()
+    ax1.scatter(num_trees, total_ops, label=f"total operations")
+    ax1.scatter(num_trees, treewise_ops, label="treewise")
+    ax1.set_xlabel("number of trees")
+    ax1.set_ylabel("total number of operations")
+    ax1.set_title("total number of operations")
+    ax1.legend()
+    ax2.scatter(nvals, max_stack, label="max stack size")
+    ax2.set_xlabel("number of samples")
+    ax2.set_ylabel("max stack size")
+    ax2.set_title("max stack size")
+    plt.tight_layout()
     fig.savefig(f"stack_history.png", bbox_inches = "tight")
 
 
