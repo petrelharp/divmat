@@ -81,7 +81,7 @@ class DivergenceMatrix:
         print(f"..........{msg}................")
         print(f"position = {self.position}")
         for j in range(num_nodes):
-            st = "NaN" if j == self.virtual_root else f"{self.nodes_time[j]}"
+            st = "NaN" if j >= self.virtual_root else f"{self.nodes_time[j]}"
             pt = "NaN" if self.parent[j] == tskit.NULL else f"{self.nodes_time[self.parent[j]]}"
             print(f"node {j} -> {self.parent[j]}: "
                   f"ns = {self.num_samples[j]}, "
@@ -168,6 +168,8 @@ class DivergenceMatrix:
             self.insert_root(path_end)
         self.insert_branch(p, c)
 
+    ######### begin stack stuff
+
     def _add_to_stack(self, u, v, z):
         ustack_u = self.stack_u[u]
         ustack_z = self.stack_z[u]
@@ -181,6 +183,7 @@ class DivergenceMatrix:
             ustack_z.append(z)
 
     def add_to_stack(self, u, v, z):
+        # note: having stack entries that are zero is important sometimes
         if self.num_trees > 0:
             self.num_additions[self.tn] += 1 
         self._add_to_stack(u, v, z)
@@ -269,35 +272,12 @@ class DivergenceMatrix:
         if verbose: print("---------------")
         return out
 
-    def clear_edge(self, n):
+    def clear_children(self, n):
         """
-        Push all contributions from the edge above n into the stack,
-        which will add to stack[(n, u)] for all u in the sibs of n.
-        This does NOT go up the path from n to the root,
-        so it only works if we've already cleared all those parental
-        nodes (so all connections to higher-up sibs are in the stack).
-        """
-        # self.print_state(f'before edge {n}')
-        p = self.parent[n]
-        if p == tskit.NULL:
-            p = self.virtual_root
-        z = self.get_z(n)
-        # should have already cleared the stack
-        # assert len(self.stack_u[p]) == 0
-        u = self.left_child[p]
-        while u != tskit.NULL:
-            if u != n:
-                # print(f"adding {z} to {(u, n)}")
-                self.add_to_stack(u, n, z)
-            u = self.right_sib[u]
-        self.x[n] = self.position
-        # self.print_state(f'after edge {n}')
-
-
-    def clear_edges(self, n):
-        """
-        Push down references in the stack from n to other nodes
-        to the children of n.
+        Moves all contributions of the edges between n and the children of n
+        into stack entries, also adding these edges to stack entries of n.
+        This is only a valid move in the context of clear_spine,
+        when the only stack entries are to sibs of the path back to the root.
         """
         # this operation should not change the current output
         # before_state = self.current_state()
@@ -312,13 +292,23 @@ class DivergenceMatrix:
         # self.print_state(f'after stack {n}')
         c = self.left_child[n]
         while c != tskit.NULL:
-            # print(f'clearing {c}')
-            self.clear_edge(c)
+            zc = self.get_z(c)
+            v = self.left_child[n]
+            while v != tskit.NULL:
+                if c != v:
+                    # print(f"adding {zu} to {(c, v)}")
+                    self.add_to_stack(c, v, zc)
+                v = self.right_sib[v]
+            self.x[c] = self.position
             c = self.right_sib[c]
         # after_state = self.current_state()
         # assert_dicts_close(before_state, after_state)
 
     def clear_node_stack(self, n):
+        """
+        Push down references in the stack from n to other nodes
+        to the children of n.
+        """
         for w, z in zip(self.stack_u[n], self.stack_z[n]):
             c = self.left_child[n]
             while c != tskit.NULL:
@@ -349,10 +339,36 @@ class DivergenceMatrix:
         # entries made to propagate edges down the spine,
         # which is why previous ones had to be cleared first
         for j in range(len(spine) - 1, -1, -1):
-            self.clear_edges(spine[j])
+            self.clear_children(spine[j])
         # self.verify_zero_spine(n)
         # after_state = self.current_state()
         # assert_dicts_close(before_state, after_state)
+
+    def clear_subtree_stack(self, n):
+        # this operation should not change the current output
+        # before_state = self.current_state()
+        self.clear_node_stack(n)
+        # after_state = self.current_state()
+        # assert_dicts_close(before_state, after_state)
+        c = self.left_child[n]
+        while c != -1:
+            # TODO: this only works with samples all at time 0
+            if self.nodes_time[c] > 0:
+                self.clear_subtree_stack(c)
+            c = self.right_sib[c]
+
+    def clear_subtree_edges(self, n):
+        # this operation should not change the current output
+        # before_state = self.current_state()
+        self.clear_children(n)
+        # after_state = self.current_state()
+        # assert_dicts_close(before_state, after_state)
+        c = self.left_child[n]
+        while c != -1:
+            # TODO: this only works with samples all at time 0
+            if self.nodes_time[c] > 0:
+                self.clear_subtree_edges(c)
+            c = self.right_sib[c]
 
     def run(self):
         sequence_length = self.sequence_length
@@ -366,11 +382,10 @@ class DivergenceMatrix:
 
         j = 0
         k = 0
-        left = 0
+        # TODO: self.position is redundant with left
+        self.position = left = 0
 
-        # modified this to include_terminal edge removals
-        while k < M:
-            self.position = left
+        while k < M and left < self.sequence_length:
             while k < M and edges_right[out_order[k]] == left:
                 p = edges_parent[out_order[k]]
                 c = edges_child[out_order[k]]
@@ -395,6 +410,7 @@ class DivergenceMatrix:
                 right = min(right, edges_left[in_order[j]])
             if k < M:
                 right = min(right, edges_right[out_order[k]])
+            self.position = left = right
             left = right
             # stack recording
             if self.num_trees > 0:
@@ -402,7 +418,10 @@ class DivergenceMatrix:
                     len(u) for u in self.stack_u
                 ]
             self.tn += 1
-        # self.print_state("done") ##
+        # clear out final tree
+        assert j == M and left == self.sequence_length
+        self.clear_subtree_stack(self.virtual_root)
+        self.clear_subtree_edges(self.virtual_root)
         out = np.zeros((len(self.samples), len(self.samples)))
         for i in self.samples:
             for j, z in zip(self.stack_u[i], self.stack_z[i]):
