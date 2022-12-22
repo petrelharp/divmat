@@ -475,6 +475,23 @@ def get_stack_history(ts):
     return dm
 
 
+def treewise_counts(ts):
+    total = 0
+    n = ts.num_samples
+    for t, (_, edges, edges_in) in zip(ts.trees(), ts.edge_diffs()):
+        edges.extend(edges_in)
+        changed = set()
+        for e in edges:
+            for u in (e.parent, e.child):
+                while u != tskit.NULL:
+                    changed.add(u)
+                    u = t.parent(u)
+        for u in changed:
+            k = t.num_samples(u)
+            total += k * (n - k)
+    return total
+
+
 def verify():
     for seed in range(1, 10):
         ts = msprime.sim_ancestry(
@@ -493,11 +510,12 @@ def verify():
 def plot_stack():
     seed = 123
     n = 20
+    seqlen = 1e6
     ts = msprime.sim_ancestry(
         n,
         ploidy=1,
         population_size=10**4,
-        sequence_length=1e5,
+        sequence_length=seqlen,
         recombination_rate=1e-8,
         random_seed=seed,
     )
@@ -515,52 +533,69 @@ def plot_stack():
     ax2.set_xlabel("tree number")
     ax2.set_ylabel("number of operations")
     ax2.legend()
-    fig.savefig(f"stack_profile_{ts.num_trees}_{ts.num_samples}_{seed}.png", bbox_inches = "tight")
+    fig.savefig(f"stack_profile_{ts.num_trees}_{ts.num_samples}_{seqlen}_{seed}.png", bbox_inches = "tight")
 
 
 def plot_stack_growth():
     seed = 123
-    nvals = np.linspace(4, 104, 21).astype("int")
-    total_ops = np.zeros(len(nvals))
-    treewise_ops = np.zeros(len(nvals))
-    max_stack = np.zeros(len(nvals))
-    num_trees = np.zeros(len(nvals))
-    for j, n in enumerate(nvals):
-        ts = msprime.sim_ancestry(
-            n,
-            ploidy=1,
-            population_size=10**4,
-            sequence_length=1e7,
-            recombination_rate=1e-8,
-            random_seed=seed,
-        )
-        num_trees[j] = ts.num_trees
-        dm = get_stack_history(ts)
-        total_ops[j] = np.sum(dm.num_additions) + np.sum(dm.num_deletions)
-        max_stack[j] = np.max(np.sum(dm.stack_history, axis=1))
-        for t in ts.trees():
-            for n in t.nodes():
-                treewise_ops[j] += t.num_samples(n)
-    fig, (ax0, ax1, ax2) = plt.subplots(3, 1, figsize=(12,12))
-    ax0.scatter(nvals, total_ops, label=f"total operations")
-    ax0.scatter(nvals, treewise_ops, label="treewise")
-    ax0.set_xlabel("number of samples")
-    ax0.set_ylabel("total number of operations")
-    ax0.set_title("total number of operations")
-    ax0.legend()
-    ax1.scatter(num_trees, total_ops, label=f"total operations")
-    ax1.scatter(num_trees, treewise_ops, label="treewise")
-    ax1.set_xlabel("number of trees")
-    ax1.set_ylabel("total number of operations")
-    ax1.set_title("total number of operations")
-    ax1.legend()
-    ax2.scatter(nvals, max_stack, label="max stack size")
-    ax2.set_xlabel("number of samples")
-    ax2.set_ylabel("max stack size")
-    ax2.set_title("max stack size")
-    plt.tight_layout()
-    fig.savefig(f"stack_history.png", bbox_inches = "tight")
-
+    for seqlen in (1e5, ):
+        nvals = np.linspace(4, 204, 21).astype("int")
+        total_ops = np.zeros(len(nvals))
+        treewise_ops = np.zeros(len(nvals))
+        max_stack = np.zeros(len(nvals))
+        num_trees = np.zeros(len(nvals))
+        mean_ops = np.zeros(len(nvals))
+        mean_stack = np.zeros(len(nvals))
+        for j, num_samples in enumerate(nvals):
+            ts = msprime.sim_ancestry(
+                num_samples,
+                ploidy=1,
+                population_size=10**4,
+                sequence_length=seqlen,
+                recombination_rate=1e-8,
+                random_seed=seed,
+            )
+            num_trees[j] = ts.num_trees
+            dm = get_stack_history(ts)
+            total_ops[j] = np.sum(dm.num_additions) + np.sum(dm.num_deletions)
+            max_stack[j] = np.max(np.sum(dm.stack_history, axis=1))
+            mean_ops[j] = np.mean(dm.num_additions + dm.num_deletions)
+            mean_stack[j] = np.mean(np.sum(dm.stack_history, axis=1))
+            treewise_ops[j] = treewise_counts(ts)
+        # start stack history
+        fig, (ax0, ax1, ax2) = plt.subplots(3, 1, figsize=(12,12))
+        ax0.scatter(nvals, total_ops, label=f"total operations")
+        ax0.scatter(nvals, treewise_ops, label="treewise")
+        ax0.set_xlabel("number of samples")
+        ax0.set_ylabel("total number of operations")
+        ax0.set_title("total number of operations")
+        ax0.legend()
+        ax1.scatter(num_trees, total_ops, label=f"total operations")
+        ax1.scatter(num_trees, treewise_ops, label="treewise")
+        ax1.set_xlabel("number of trees")
+        ax1.set_ylabel("total number of operations")
+        ax1.set_title("total number of operations")
+        ax1.legend()
+        ax2.scatter(nvals, max_stack, label="max stack size")
+        ax2.set_xlabel("number of samples")
+        ax2.set_ylabel("max stack size")
+        ax2.set_title("max stack size")
+        plt.tight_layout()
+        fig.savefig(f"stack_history_{seqlen}.png", bbox_inches = "tight")
+        # start stack usage
+        fig, (ax0, ax1) = plt.subplots(2, 1, figsize=(12,12))
+        ax0.scatter(nvals, mean_ops, label=f"mean number of operations")
+        ax0.scatter(nvals, treewise_ops/num_trees, label=f"pairwise changed samples")
+        ax0.set_xlabel("number of samples")
+        ax0.set_ylabel("mean number of operations per tree")
+        ax0.set_title("mean number of operations per tree")
+        ax0.legend()
+        ax1.scatter(nvals, mean_stack, label="mean stack size")
+        ax1.set_xlabel("number of samples")
+        ax1.set_ylabel("mean stack size")
+        ax1.set_title("mean stack size")
+        plt.tight_layout()
+        fig.savefig(f"stack_usage_{seqlen}.png", bbox_inches = "tight")
 
 
 if __name__ == "__main__":
