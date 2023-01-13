@@ -2,6 +2,7 @@
 import time
 import itertools
 import numba
+from numba import types, typed
 
 import msprime
 import tskit
@@ -39,13 +40,14 @@ spec = [
     ("samples", numba.int32[:]),
     ("position", numba.float64),
     ("virtual_root", numba.int32),
-    ("stack_u", numba.int32[:,:]),
-    ("stack_z", numba.float64[:,:]),
-    ("x", numba.int32[:]),
+    # int64 avoids a warning here, probably makes no real difference to int32
+    ("stack_u", types.ListType(types.ListType(types.int64))),
+    ("stack_z", types.ListType(types.ListType(types.float64))),
+    ("x", numba.float64[:]),
 ]
 
 
-# @numba.experimental.jitclass(spec)
+@numba.experimental.jitclass(spec)
 class DivergenceMatrix:
     def __init__(
         self,
@@ -80,6 +82,13 @@ class DivergenceMatrix:
         self.samples = samples
         self.position = 0
         self.virtual_root = num_nodes
+        self.x = np.zeros(num_nodes + 1, dtype=np.float64)
+        self.stack_u = typed.List(
+            [typed.List.empty_list(types.int64) for _ in range(num_nodes + 1)]
+        )
+        self.stack_z = typed.List(
+            [typed.List.empty_list(types.float64) for _ in range(num_nodes + 1)]
+        )
 
         n = samples.shape[0]
         for j in range(n):
@@ -87,23 +96,24 @@ class DivergenceMatrix:
             self.num_samples[u] = 1
             self.insert_root(u)
 
-        # this looks ugly for numba
-        self.stack_u = [[np.int32(x) for x in range(0)] for _ in range(num_nodes + 1)]
-        self.stack_z = [[np.float64(x) for x in range(0)] for _ in range(num_nodes + 1)]
-        self.x = np.zeros(num_nodes + 1)
-
     def print_state(self, msg=""):
         num_nodes = len(self.parent)
         print(f"..........{msg}................")
         print(f"position = {self.position}")
         for j in range(num_nodes):
             st = "NaN" if j >= self.virtual_root else f"{self.nodes_time[j]}"
-            pt = "NaN" if self.parent[j] == tskit.NULL else f"{self.nodes_time[self.parent[j]]}"
-            print(f"node {j} -> {self.parent[j]}: "
-                  f"ns = {self.num_samples[j]}, "
-                  f"z = ({pt} - {st})"
-                  f" * ({self.position} - {self.x[j]})"
-                  f" = {self.get_z(j)}")
+            pt = (
+                "NaN"
+                if self.parent[j] == tskit.NULL
+                else f"{self.nodes_time[self.parent[j]]}"
+            )
+            print(
+                f"node {j} -> {self.parent[j]}: "
+                f"ns = {self.num_samples[j]}, "
+                f"z = ({pt} - {st})"
+                f" * ({self.position} - {self.x[j]})"
+                f" = {self.get_z(j)}"
+            )
             for u, z in zip(self.stack_u[j], self.stack_z[j]):
                 print(f"   {(j, u)}: {z}")
         print(f"Virtual root: {self.virtual_root}")
@@ -160,7 +170,7 @@ class DivergenceMatrix:
         u = p
         while u != tskit.NULL:
             path_end = u
-            path_end_was_root = (self.num_samples[u] > 0)
+            path_end_was_root = self.num_samples[u] > 0
             self.num_samples[u] -= self.num_samples[c]
             u = self.parent[u]
         if path_end_was_root and (self.num_samples[path_end] == 0):
@@ -175,7 +185,7 @@ class DivergenceMatrix:
         u = p
         while u != tskit.NULL:
             path_end = u
-            path_end_was_root = (self.num_samples[u] > 0)
+            path_end_was_root = self.num_samples[u] > 0
             self.num_samples[u] += self.num_samples[c]
             u = self.parent[u]
         if self.num_samples[c] > 0:
@@ -228,9 +238,13 @@ class DivergenceMatrix:
 
     def get_z(self, u):
         p = self.parent[u]
-        return 0 if p == tskit.NULL else (
+        return (
+            0
+            if p == tskit.NULL
+            else (
                 (self.nodes_time[self.parent[u]] - self.nodes_time[u])
                 * (self.position - self.x[u])
+            )
         )
 
     def mrca(self, a, b):
@@ -251,8 +265,9 @@ class DivergenceMatrix:
         (In other words, disconnected trees act as if they are
         connected to a virtual root by a branch of length zero.)
         """
-        if verbose: print("---------------")
-        out = {(a, b) : 0 for a in self.samples for b in self.samples if a < b}
+        if verbose:
+            print("---------------")
+        out = {(a, b): 0 for a in self.samples for b in self.samples if a < b}
         for a in self.samples:
             for b in self.samples:
                 if a < b:
@@ -261,13 +276,15 @@ class DivergenceMatrix:
                     # edges on the path up from a
                     pa = a
                     while pa != m:
-                        if verbose: print("edge:", k, pa, self.get_z(pa))
+                        if verbose:
+                            print("edge:", k, pa, self.get_z(pa))
                         out[k] += self.get_z(pa)
                         pa = self.parent[pa]
                     # edges on the path up from b
                     pb = b
                     while pb != m:
-                        if verbose: print("edge:", k, pb, self.get_z(pb))
+                        if verbose:
+                            print("edge:", k, pb, self.get_z(pb))
                         out[k] += self.get_z(pb)
                         pb = self.parent[pb]
                     # pairwise stack references along the way
@@ -277,11 +294,13 @@ class DivergenceMatrix:
                         while pb != m:
                             for w, z in zip(self.stack_u[pa], self.stack_z[pa]):
                                 if w == pb:
-                                    if verbose: print("stack:", k, (pa, pb), z)
+                                    if verbose:
+                                        print("stack:", k, (pa, pb), z)
                                     out[k] += z
                             pb = self.parent[pb]
                         pa = self.parent[pa]
-        if verbose: print("---------------")
+        if verbose:
+            print("---------------")
         return out
 
     def clear_children(self, n):
@@ -356,31 +375,41 @@ class DivergenceMatrix:
         # after_state = self.current_state()
         # assert_dicts_close(before_state, after_state)
 
-    def clear_subtree_stack(self, n):
-        # this operation should not change the current output
-        # before_state = self.current_state()
-        self.clear_node_stack(n)
-        # after_state = self.current_state()
-        # assert_dicts_close(before_state, after_state)
-        c = self.left_child[n]
-        while c != -1:
-            # TODO: this only works with samples all at time 0
-            if self.nodes_time[c] > 0:
-                self.clear_subtree_stack(c)
-            c = self.right_sib[c]
+    def clear_subtree_stack(self, u):
+        # Note: we should probably change the name of the other "stack"
+        # stuff to avoid confusion
+        stack = [u]
+        while len(stack) > 0:
+            u = stack.pop()
+            # this operation should not change the current output
+            # before_state = self.current_state()
+            self.clear_node_stack(u)
+            # after_state = self.current_state()
+            # assert_dicts_close(before_state, after_state)
+            c = self.left_child[u]
+            while c != -1:
+                # TODO: this only works with samples all at time 0
+                if self.nodes_time[c] > 0:
+                    stack.append(c)
+                c = self.right_sib[c]
 
-    def clear_subtree_edges(self, n):
-        # this operation should not change the current output
-        # before_state = self.current_state()
-        self.clear_children(n)
-        # after_state = self.current_state()
-        # assert_dicts_close(before_state, after_state)
-        c = self.left_child[n]
-        while c != -1:
-            # TODO: this only works with samples all at time 0
-            if self.nodes_time[c] > 0:
-                self.clear_subtree_edges(c)
-            c = self.right_sib[c]
+    def clear_subtree_edges(self, u):
+        # Note: we should probably change the name of the other "stack"
+        # stuff to avoid confusion
+        stack = [u]
+        while len(stack) > 0:
+            u = stack.pop()
+            # this operation should not change the current output
+            # before_state = self.current_state()
+            self.clear_children(u)
+            # after_state = self.current_state()
+            # assert_dicts_close(before_state, after_state)
+            c = self.left_child[u]
+            while c != -1:
+                # TODO: this only works with samples all at time 0
+                if self.nodes_time[c] > 0:
+                    stack.append(c)
+                c = self.right_sib[c]
 
     def run(self):
         sequence_length = self.sequence_length
@@ -452,31 +481,32 @@ def divergence_matrix(ts):
 
 def lib_divergence_matrix(ts, mode="branch"):
     out = ts.divergence(
-            [[u] for u in ts.samples()],
-            [(i, j) for i in range(ts.num_samples) for j in range(ts.num_samples)],
-            mode=mode,
-            span_normalise=False
+        [[u] for u in ts.samples()],
+        [(i, j) for i in range(ts.num_samples) for j in range(ts.num_samples)],
+        mode=mode,
+        span_normalise=False,
     ).reshape((ts.num_samples, ts.num_samples))
     for i in range(ts.num_samples):
         out[i, i] = 0
     return out
 
+
 def verify():
     for seed in range(1, 10):
         ts = msprime.sim_ancestry(
-                10,
-                ploidy=1,
-                population_size=10,
-                sequence_length=100,
-                recombination_rate=0.01,
-                random_seed=seed
+            10,
+            ploidy=1,
+            population_size=10,
+            sequence_length=100,
+            recombination_rate=0.01,
+            random_seed=seed,
         )
         D1 = lib_divergence_matrix(ts, mode="branch")
         D2 = divergence_matrix(ts)
         print(f"========{ts.num_trees}=============")
         for i in range(D2.shape[0]):
             for j in range(D2.shape[1]):
-                    print(i, j, D1[i, j], D2[i, j])
+                print(i, j, D1[i, j], D2[i, j])
         print("=====================")
         assert np.allclose(D1, D2)
 
@@ -499,12 +529,12 @@ def compare_perf():
         before = time.perf_counter()
         D2 = divergence_matrix(ts)
         time_nb = time.perf_counter() - before
-        assert_dicts_close(D1, D2)
+        assert np.allclose(D1, D2)
         print(n, ts.num_trees, f"{time_lib:.2f}", f"{time_nb:.2f}", sep="\t")
 
 
 if __name__ == "__main__":
 
     np.set_printoptions(linewidth=500, precision=4)
-    verify()
-    # compare_perf()
+    # verify()
+    compare_perf()
