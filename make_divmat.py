@@ -32,6 +32,7 @@ class DivergenceMatrix:
         edge_insertion_order,
         edge_removal_order,
         sequence_length,
+        verbose=False,
     ):
         # Quintuply linked tree
         self.parent = np.full(num_nodes + 1, -1, dtype=np.int32)
@@ -55,6 +56,7 @@ class DivergenceMatrix:
         self.virtual_root = num_nodes
         self.x = np.zeros(num_nodes + 1, dtype=np.float64)
         self.stack = [{} for _ in range(num_nodes + 1)]
+        self.verbose = verbose
 
         n = samples.shape[0]
         for j in range(n):
@@ -209,7 +211,7 @@ class DivergenceMatrix:
             b = self.parent[b]
         return b
 
-    def current_state(self, verbose=False):
+    def current_state(self):
         """
         Compute the current output, for debugging.
         NOTE that the path back to the roots of disconnected trees
@@ -217,7 +219,7 @@ class DivergenceMatrix:
         (In other words, disconnected trees act as if they are
         connected to a virtual root by a branch of length zero.)
         """
-        if verbose:
+        if self.verbose:
             print("---------------")
         out = {(a, b): 0 for a in self.samples for b in self.samples if a < b}
         for a in self.samples:
@@ -228,14 +230,14 @@ class DivergenceMatrix:
                     # edges on the path up from a
                     pa = a
                     while pa != m:
-                        if verbose:
+                        if self.verbose:
                             print("edge:", k, pa, self.get_z(pa))
                         out[k] += self.get_z(pa)
                         pa = self.parent[pa]
                     # edges on the path up from b
                     pb = b
                     while pb != m:
-                        if verbose:
+                        if self.verbose:
                             print("edge:", k, pb, self.get_z(pb))
                         out[k] += self.get_z(pb)
                         pb = self.parent[pb]
@@ -246,12 +248,12 @@ class DivergenceMatrix:
                         while pb != m:
                             for w, z in self.stack[pa].items():
                                 if w == pb:
-                                    if verbose:
+                                    if self.verbose:
                                         print("stack:", k, (pa, pb), z)
                                     out[k] += z
                             pb = self.parent[pb]
                         pa = self.parent[pa]
-        if verbose:
+        if self.verbose:
             print("---------------")
         return out
 
@@ -268,18 +270,21 @@ class DivergenceMatrix:
             c = self.left_child[n]
             while c != tskit.NULL:
                 zc = self.get_z(c)
-                # print(f"adding {z}+{zc}={z+zc} to {(w, c)}")
+                if self.verbose:
+                    print(f"adding {z}+{zc}={z+zc} to {(w, c)}")
                 self.add_to_stack(w, c, z + zc)
                 c = self.right_sib[c]
         self.empty_stack(n)
-        # self.print_state(f'after stack {n}')
+        if self.verbose:
+            self.print_state(f'after stack {n}')
         c = self.left_child[n]
         while c != tskit.NULL:
             zc = self.get_z(c)
             v = self.left_child[n]
             while v != tskit.NULL:
                 if c != v:
-                    # print(f"adding {zu} to {(c, v)}")
+                    if self.verbose:
+                        print(f"adding {zc} to {(c, v)}")
                     self.add_to_stack(c, v, zc)
                 v = self.right_sib[v]
             self.x[c] = self.position
@@ -295,7 +300,8 @@ class DivergenceMatrix:
         for w, z in self.stack[n].items():
             c = self.left_child[n]
             while c != tskit.NULL:
-                # print(f"adding {z} to {(w, c)}")
+                if self.verbose:
+                    print(f"adding {z} to {(w, c)}")
                 self.add_to_stack(w, c, z)
                 c = self.right_sib[c]
         self.empty_stack(n)
@@ -415,7 +421,7 @@ class DivergenceMatrix:
         return out
 
 
-def divergence_matrix(ts):
+def divergence_matrix(ts, **kwargs):
     dm = DivergenceMatrix(
         ts.num_nodes,
         samples=ts.samples(),
@@ -427,6 +433,7 @@ def divergence_matrix(ts):
         edge_insertion_order=ts.indexes_edge_insertion_order,
         edge_removal_order=ts.indexes_edge_removal_order,
         sequence_length=ts.sequence_length,
+        **kwargs
     )
     return dm.run()
 
@@ -441,6 +448,20 @@ def lib_divergence_matrix(ts, mode="branch"):
     for i in range(ts.num_samples):
         out[i, i] = 0
     return out
+
+
+def small_example():
+    ts = msprime.sim_ancestry(
+        4,
+        ploidy=1,
+        population_size=10,
+        sequence_length=10,
+        recombination_rate=0.01,
+        random_seed=123,
+    )
+    print(f"========trees: {ts.num_trees}=============")
+    D2 = divergence_matrix(ts, verbose=True)
+    print("=====================")
 
 
 def verify():
@@ -488,5 +509,6 @@ def compare_perf():
 if __name__ == "__main__":
 
     np.set_printoptions(linewidth=500, precision=4)
+    # small_example()
     verify()
     # compare_perf()
