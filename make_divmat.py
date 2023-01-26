@@ -1,8 +1,6 @@
 # Efficient computation of the pairwise divergence matrix.
 import time
 import itertools
-import numba
-from numba import types, typed
 
 import msprime
 import tskit
@@ -21,33 +19,6 @@ def assert_dicts_close(d1, d2):
         assert np.isclose(d1[k], d2[k])
 
 
-spec = [
-    ("parent", numba.int32[:]),
-    ("left_sib", numba.int32[:]),
-    ("right_sib", numba.int32[:]),
-    ("left_child", numba.int32[:]),
-    ("right_child", numba.int32[:]),
-    ("sample_index_map", numba.int32[:]),
-    ("num_samples", numba.int32[:]),
-    ("edges_left", numba.float64[:]),
-    ("edges_right", numba.float64[:]),
-    ("edges_parent", numba.int32[:]),
-    ("edges_child", numba.int32[:]),
-    ("edge_insertion_order", numba.int32[:]),
-    ("edge_removal_order", numba.int32[:]),
-    ("sequence_length", numba.float64),
-    ("nodes_time", numba.float64[:]),
-    ("samples", numba.int32[:]),
-    ("position", numba.float64),
-    ("virtual_root", numba.int32),
-    # int64 avoids a warning here, probably makes no real difference to int32
-    ("stack_u", types.ListType(types.ListType(types.int64))),
-    ("stack_z", types.ListType(types.ListType(types.float64))),
-    ("x", numba.float64[:]),
-]
-
-
-@numba.experimental.jitclass(spec)
 class DivergenceMatrix:
     def __init__(
         self,
@@ -83,12 +54,7 @@ class DivergenceMatrix:
         self.position = 0
         self.virtual_root = num_nodes
         self.x = np.zeros(num_nodes + 1, dtype=np.float64)
-        self.stack_u = typed.List(
-            [typed.List.empty_list(types.int64) for _ in range(num_nodes + 1)]
-        )
-        self.stack_z = typed.List(
-            [typed.List.empty_list(types.float64) for _ in range(num_nodes + 1)]
-        )
+        self.stack = [{} for _ in range(num_nodes + 1)]
 
         n = samples.shape[0]
         for j in range(n):
@@ -114,7 +80,7 @@ class DivergenceMatrix:
                 f" * ({self.position} - {self.x[j]})"
                 f" = {self.get_z(j)}"
             )
-            for u, z in zip(self.stack_u[j], self.stack_z[j]):
+            for u, z in self.stack[j].items():
                 print(f"   {(j, u)}: {z}")
         print(f"Virtual root: {self.virtual_root}")
         roots = []
@@ -196,41 +162,27 @@ class DivergenceMatrix:
 
     ######### begin stack stuff
 
-    def _add_to_stack(self, u, v, z):
-        ustack_u = self.stack_u[u]
-        ustack_z = self.stack_z[u]
-        append = True
-        for j in range(len(ustack_u)):
-            if ustack_u[j] == v:
-                ustack_z[j] += z
-                append = False
-        if append:
-            ustack_u.append(v)
-            ustack_z.append(z)
-
     def add_to_stack(self, u, v, z):
         # note: having stack entries that are zero is important sometimes
-        self._add_to_stack(u, v, z)
-        self._add_to_stack(v, u, z)
+        if v not in self.stack[u]:
+            self.stack[u][v] = 0.0
+            assert u not in self.stack[v]
+            self.stack[v][u] = 0.0
+        self.stack[u][v] += z
+        self.stack[v][u] += z
 
     def empty_stack(self, n):
-        for w in self.stack_u[n]:
-            wstack_u = self.stack_u[w]
-            for j in range(len(wstack_u) - 1, -1, -1):
-                u = wstack_u[j]
-                if u == n:
-                    del wstack_u[j]
-                    del self.stack_z[w][j]
-                    break
-        self.stack_u[n].clear()
-        self.stack_z[n].clear()
+        for w in self.stack[n]:
+            assert n in self.stack[w]
+            del self.stack[w][n]
+        self.stack[n].clear()
 
     def verify_zero_spine(self, n):
         """
         Verify that there are no contributions along the path
         from n up to the root. (should be true after clear_spine)
         """
-        for z in self.stack_z[n]:
+        for z in self.stack[n].values():
             assert z == 0
         while n != tskit.NULL:
             assert self.parent[n] == tskit.NULL or self.x[n] == self.position
@@ -292,7 +244,7 @@ class DivergenceMatrix:
                     while pa != m:
                         pb = b
                         while pb != m:
-                            for w, z in zip(self.stack_u[pa], self.stack_z[pa]):
+                            for w, z in self.stack[pa].items():
                                 if w == pb:
                                     if verbose:
                                         print("stack:", k, (pa, pb), z)
@@ -312,7 +264,7 @@ class DivergenceMatrix:
         """
         # this operation should not change the current output
         # before_state = self.current_state()
-        for w, z in zip(self.stack_u[n], self.stack_z[n]):
+        for w, z in self.stack[n].items():
             c = self.left_child[n]
             while c != tskit.NULL:
                 zc = self.get_z(c)
@@ -340,7 +292,7 @@ class DivergenceMatrix:
         Push down references in the stack from n to other nodes
         to the children of n.
         """
-        for w, z in zip(self.stack_u[n], self.stack_z[n]):
+        for w, z in self.stack[n].items():
             c = self.left_child[n]
             while c != tskit.NULL:
                 # print(f"adding {z} to {(w, c)}")
@@ -458,7 +410,7 @@ class DivergenceMatrix:
         self.clear_subtree_edges(self.virtual_root)
         out = np.zeros((len(self.samples), len(self.samples)))
         for i in self.samples:
-            for j, z in zip(self.stack_u[i], self.stack_z[i]):
+            for j, z in self.stack[i].items():
                 out[i, j] = z
         return out
 
@@ -536,5 +488,5 @@ def compare_perf():
 if __name__ == "__main__":
 
     np.set_printoptions(linewidth=500, precision=4)
-    # verify()
-    compare_perf()
+    verify()
+    # compare_perf()
