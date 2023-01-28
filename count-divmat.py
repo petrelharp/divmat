@@ -176,15 +176,15 @@ class DivergenceMatrix:
     ######### begin stack stuff
 
     def add_to_stack(self, u, v, z):
-        if self.num_trees > 0:
-            self.num_additions[self.tn] += 1
-        assert u != v
-        if v not in self.stack[u]:
-            self.stack[u][v] = 0.0
-            assert u not in self.stack[v]
-            self.stack[v][u] = 0.0
-        self.stack[u][v] += z
-        self.stack[v][u] += z
+        if z > 0:
+            if self.num_trees > 0:
+                self.num_additions[self.tn] += 1
+            if v not in self.stack[u]:
+                self.stack[u][v] = 0.0
+                assert u not in self.stack[v]
+                self.stack[v][u] = 0.0
+            self.stack[u][v] += z
+            self.stack[v][u] += z
 
     def empty_stack(self, n):
         for w in self.stack[n]:

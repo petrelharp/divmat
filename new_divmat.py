@@ -167,20 +167,20 @@ class DivergenceMatrix:
     ######### begin stack stuff
 
     def add_to_stack(self, u, v, z):
-        assert u != v
-        if v not in self.stack[u]:
-            self.stack[u][v] = 0.0
-            assert u not in self.stack[v]
-            self.stack[v][u] = 0.0
-        self.stack[u][v] += z
-        self.stack[v][u] += z
+        if z > 0:
+            if v not in self.stack[u]:
+                self.stack[u][v] = 0.0
+                assert u not in self.stack[v]
+                self.stack[v][u] = 0.0
+            self.stack[u][v] += z
+            self.stack[v][u] += z
         # pedantic error checking:
         if self.strict:
-            p = self.parent[u]
+            p = u
             while p != tskit.NULL:
                 assert p != v
                 p = self.parent[p]
-            p = self.parent[v]
+            p = v
             while p != tskit.NULL:
                 assert p != u
                 p = self.parent[p]
