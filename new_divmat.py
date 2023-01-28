@@ -32,7 +32,8 @@ class DivergenceMatrix:
         edge_insertion_order,
         edge_removal_order,
         sequence_length,
-        verbose=False,
+        verbosity=0,
+        strict=False,
     ):
         # Quintuply linked tree
         self.parent = np.full(num_nodes + 1, -1, dtype=np.int32)
@@ -56,7 +57,8 @@ class DivergenceMatrix:
         self.virtual_root = num_nodes
         self.x = np.zeros(num_nodes + 1, dtype=np.float64)
         self.stack = [{} for _ in range(num_nodes + 1)]
-        self.verbose = verbose
+        self.verbosity = verbosity
+        self.strict = strict
 
         n = samples.shape[0]
         for j in range(n):
@@ -165,13 +167,23 @@ class DivergenceMatrix:
     ######### begin stack stuff
 
     def add_to_stack(self, u, v, z):
-        # note: having stack entries that are zero is important sometimes
-        if v not in self.stack[u]:
-            self.stack[u][v] = 0.0
-            assert u not in self.stack[v]
-            self.stack[v][u] = 0.0
-        self.stack[u][v] += z
-        self.stack[v][u] += z
+        if z > 0:
+            if v not in self.stack[u]:
+                self.stack[u][v] = 0.0
+                assert u not in self.stack[v]
+                self.stack[v][u] = 0.0
+            self.stack[u][v] += z
+            self.stack[v][u] += z
+        # pedantic error checking:
+        if self.strict:
+            p = u
+            while p != tskit.NULL:
+                assert p != v
+                p = self.parent[p]
+            p = v
+            while p != tskit.NULL:
+                assert p != u
+                p = self.parent[p]
 
     def empty_stack(self, n):
         for w in self.stack[n]:
@@ -184,7 +196,9 @@ class DivergenceMatrix:
         Verify that there are no contributions along the path
         from n up to the root. (should be true after clear_spine)
         """
-        for z in self.stack[n].values():
+        for u, z in self.stack[n].items():
+            if z != 0:
+                print(f"Uh-oh!: [{n}] : ({u}, {z})")
             assert z == 0
         while n != tskit.NULL:
             assert self.parent[n] == tskit.NULL or self.x[n] == self.position
@@ -219,7 +233,7 @@ class DivergenceMatrix:
         (In other words, disconnected trees act as if they are
         connected to a virtual root by a branch of length zero.)
         """
-        if self.verbose:
+        if self.verbosity > 1:
             print("---------------")
         out = {(a, b): 0 for a in self.samples for b in self.samples if a < b}
         for a in self.samples:
@@ -230,14 +244,14 @@ class DivergenceMatrix:
                     # edges on the path up from a
                     pa = a
                     while pa != m:
-                        if self.verbose:
+                        if self.verbosity > 1:
                             print("edge:", k, pa, self.get_z(pa))
                         out[k] += self.get_z(pa)
                         pa = self.parent[pa]
                     # edges on the path up from b
                     pb = b
                     while pb != m:
-                        if self.verbose:
+                        if self.verbosity > 1:
                             print("edge:", k, pb, self.get_z(pb))
                         out[k] += self.get_z(pb)
                         pb = self.parent[pb]
@@ -248,126 +262,95 @@ class DivergenceMatrix:
                         while pb != m:
                             for w, z in self.stack[pa].items():
                                 if w == pb:
-                                    if self.verbose:
+                                    if self.verbosity > 1:
                                         print("stack:", k, (pa, pb), z)
                                     out[k] += z
                             pb = self.parent[pb]
                         pa = self.parent[pa]
-        if self.verbose:
+        if self.verbosity > 1:
             print("---------------")
         return out
 
-    def clear_children(self, n):
-        """
-        Moves all contributions of the edges between n and the children of n
-        into stack entries, also adding these edges to stack entries of n.
-        This is only a valid move in the context of clear_spine,
-        when the only stack entries are to sibs of the path back to the root.
-        """
-        # this operation should not change the current output
-        # before_state = self.current_state()
-        for w, z in self.stack[n].items():
-            c = self.left_child[n]
-            while c != tskit.NULL:
-                zc = self.get_z(c)
-                if self.verbose:
-                    print(f"adding {z}+{zc}={z+zc} to {(w, c)}")
-                self.add_to_stack(w, c, z + zc)
-                c = self.right_sib[c]
-        self.empty_stack(n)
-        if self.verbose:
-            self.print_state(f'after stack {n}')
-        c = self.left_child[n]
-        while c != tskit.NULL:
-            zc = self.get_z(c)
-            v = self.left_child[n]
-            while v != tskit.NULL:
-                if c != v:
-                    if self.verbose:
-                        print(f"adding {zc} to {(c, v)}")
-                    self.add_to_stack(c, v, zc)
-                v = self.right_sib[v]
-            self.x[c] = self.position
-            c = self.right_sib[c]
-        # after_state = self.current_state()
-        # assert_dicts_close(before_state, after_state)
+    def clear_edge(self, n):
+        if self.verbosity > 0:
+            print(f"clear_edge({n})")
+        if self.strict:
+            # this operation should not change the current output
+            before_state = self.current_state()
+        z = self.get_z(n)
+        self.x[n] = self.position
+        assert self.get_z(n) == 0
+        # iterate over the siblings of the path to the virtual root
+        c = n
+        p = self.parent[c]
+        # how to better include the virtual root in the traversal?
+        root = False
+        while p != tskit.NULL:
+            s = self.left_child[p]
+            while s != tskit.NULL:
+                if s != c:
+                    if self.verbosity > 1:
+                        print(f"adding {z} to {(n, s)}")
+                    self.add_to_stack(n, s, z)
+                s = self.right_sib[s]
+            c = p
+            p = self.parent[c]
+            if not root and p == tskit.NULL:
+                p = self.virtual_root
+                root = True
+        if self.strict:
+            after_state = self.current_state()
+            assert_dicts_close(before_state, after_state)
 
-    def clear_node_stack(self, n):
+    def push_down(self, n):
         """
         Push down references in the stack from n to other nodes
         to the children of n.
         """
+        if self.strict:
+            # this operation should not change the current output
+            before_state = self.current_state()
+        if self.verbosity > 0:
+            print(f"push_down({n})")
         for w, z in self.stack[n].items():
             c = self.left_child[n]
             while c != tskit.NULL:
-                if self.verbose:
+                if self.verbosity > 1:
                     print(f"adding {z} to {(w, c)}")
                 self.add_to_stack(w, c, z)
                 c = self.right_sib[c]
         self.empty_stack(n)
+        assert len(self.stack[n]) == 0
+        if self.strict:
+            after_state = self.current_state()
+            assert_dicts_close(before_state, after_state)
 
     def clear_spine(self, n):
         """
-        Clears all nodes on the path from n up to the root,
+        Clears all nodes on the path from the virtual root down to n
         by pushing the contributions of all their branches to the stack
         and pushing all stack references to their children.
         """
-        # this operation should not change the current output
-        # before_state = self.current_state()
+        if self.verbosity > 0:
+            print(f"clear_spine({n})")
+        if self.strict:
+            # this operation should not change the current output
+            before_state = self.current_state()
         spine = []
         p = n
         while p != tskit.NULL:
             spine.append(p)
             p = self.parent[p]
         spine.append(self.virtual_root)
-        # first clear existing stack entries
         for j in range(len(spine) - 1, -1, -1):
-            self.clear_node_stack(spine[j])
-        # then go through and make new entries for the edges;
-        # this requires a different update step for the stack
-        # entries made to propagate edges down the spine,
-        # which is why previous ones had to be cleared first
-        for j in range(len(spine) - 1, -1, -1):
-            self.clear_children(spine[j])
+            p = spine[j]
+            self.clear_edge(p)
+            self.push_down(p)
+            self.verify_zero_spine(p)
         self.verify_zero_spine(n)
-        # after_state = self.current_state()
-        # assert_dicts_close(before_state, after_state)
-
-    def clear_subtree_stack(self, u):
-        # Note: we should probably change the name of the other "stack"
-        # stuff to avoid confusion
-        stack = [u]
-        while len(stack) > 0:
-            u = stack.pop()
-            # this operation should not change the current output
-            # before_state = self.current_state()
-            self.clear_node_stack(u)
-            # after_state = self.current_state()
-            # assert_dicts_close(before_state, after_state)
-            c = self.left_child[u]
-            while c != -1:
-                # TODO: this only works with samples all at time 0
-                if self.nodes_time[c] > 0:
-                    stack.append(c)
-                c = self.right_sib[c]
-
-    def clear_subtree_edges(self, u):
-        # Note: we should probably change the name of the other "stack"
-        # stuff to avoid confusion
-        stack = [u]
-        while len(stack) > 0:
-            u = stack.pop()
-            # this operation should not change the current output
-            # before_state = self.current_state()
-            self.clear_children(u)
-            # after_state = self.current_state()
-            # assert_dicts_close(before_state, after_state)
-            c = self.left_child[u]
-            while c != -1:
-                # TODO: this only works with samples all at time 0
-                if self.nodes_time[c] > 0:
-                    stack.append(c)
-                c = self.right_sib[c]
+        if self.strict:
+            after_state = self.current_state()
+            assert_dicts_close(before_state, after_state)
 
     def run(self):
         sequence_length = self.sequence_length
@@ -384,16 +367,18 @@ class DivergenceMatrix:
         # TODO: self.position is redundant with left
         self.position = left = 0
 
-        while k < M and left < self.sequence_length:
+        while k < M and left <= self.sequence_length:
             while k < M and edges_right[out_order[k]] == left:
                 p = edges_parent[out_order[k]]
                 c = edges_child[out_order[k]]
+                self.clear_edge(c)
                 self.clear_spine(p)
                 assert self.x[c] == self.position
                 assert self.parent[p] == tskit.NULL or self.x[p] == self.position
                 self.remove_edge(p, c)
                 k += 1
-                # self.print_state(f"remove {p, c}") ##
+                if self.verbosity > 1:
+                    self.print_state(f"remove {p, c}")
             while j < M and edges_left[in_order[j]] == left:
                 p = edges_parent[in_order[j]]
                 c = edges_child[in_order[j]]
@@ -403,17 +388,15 @@ class DivergenceMatrix:
                 self.insert_edge(p, c)
                 self.x[c] = self.position
                 j += 1
-                # self.print_state(f"add {p, c}") ##
+                if self.verbosity > 1:
+                    self.print_state(f"add {p, c}")
             right = sequence_length
             if j < M:
                 right = min(right, edges_left[in_order[j]])
             if k < M:
                 right = min(right, edges_right[out_order[k]])
             self.position = left = right
-        # clear out final tree
         assert j == M and left == self.sequence_length
-        self.clear_subtree_stack(self.virtual_root)
-        self.clear_subtree_edges(self.virtual_root)
         out = np.zeros((len(self.samples), len(self.samples)))
         for i in self.samples:
             for j, z in self.stack[i].items():
@@ -457,10 +440,10 @@ def small_example():
         population_size=10,
         sequence_length=10,
         recombination_rate=0.01,
-        random_seed=123,
+        random_seed=124,
     )
     print(f"========trees: {ts.num_trees}=============")
-    D2 = divergence_matrix(ts, verbose=True)
+    D2 = divergence_matrix(ts, verbosity=2)
     print("=====================")
 
 
@@ -469,41 +452,19 @@ def verify():
         ts = msprime.sim_ancestry(
             10,
             ploidy=1,
-            population_size=10,
+            population_size=20,
             sequence_length=100,
             recombination_rate=0.01,
             random_seed=seed,
         )
         D1 = lib_divergence_matrix(ts, mode="branch")
-        D2 = divergence_matrix(ts)
+        D2 = divergence_matrix(ts, verbosity=0, strict=False)
         print(f"========{ts.num_trees}=============")
         for i in range(D2.shape[0]):
             for j in range(D2.shape[1]):
                 print(i, j, D1[i, j], D2[i, j])
         print("=====================")
         assert np.allclose(D1, D2)
-
-
-def compare_perf():
-
-    seed = 123
-    for n in [10, 100, 250, 500, 1000]:
-        ts = msprime.sim_ancestry(
-            n,
-            ploidy=1,
-            population_size=10**4,
-            sequence_length=1e6,
-            recombination_rate=1e-8,
-            random_seed=seed,
-        )
-        before = time.perf_counter()
-        D1 = lib_divergence_matrix(ts, mode="branch")
-        time_lib = time.perf_counter() - before
-        before = time.perf_counter()
-        D2 = divergence_matrix(ts)
-        time_nb = time.perf_counter() - before
-        assert np.allclose(D1, D2)
-        print(n, ts.num_trees, f"{time_lib:.2f}", f"{time_nb:.2f}", sep="\t")
 
 
 if __name__ == "__main__":
