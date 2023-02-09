@@ -35,14 +35,16 @@ class DivergenceMatrix:
         verbosity=0,
         strict=False,
     ):
+        # virtual root is at num_nodes; virtual samples are beyond that
+        N = num_nodes + 1 + len(samples)
         # Quintuply linked tree
-        self.parent = np.full(num_nodes + 1, -1, dtype=np.int32)
-        self.left_sib = np.full(num_nodes + 1, -1, dtype=np.int32)
-        self.right_sib = np.full(num_nodes + 1, -1, dtype=np.int32)
-        self.left_child = np.full(num_nodes + 1, -1, dtype=np.int32)
-        self.right_child = np.full(num_nodes + 1, -1, dtype=np.int32)
+        self.parent = np.full(N, -1, dtype=np.int32)
+        self.left_sib = np.full(N, -1, dtype=np.int32)
+        self.right_sib = np.full(N, -1, dtype=np.int32)
+        self.left_child = np.full(N, -1, dtype=np.int32)
+        self.right_child = np.full(N, -1, dtype=np.int32)
         # Sample lists refer to sample *index*
-        self.num_samples = np.full(num_nodes + 1, 0, dtype=np.int32)
+        self.num_samples = np.full(N, 0, dtype=np.int32)
         # Edges and indexes
         self.edges_left = edges_left
         self.edges_right = edges_right
@@ -55,8 +57,8 @@ class DivergenceMatrix:
         self.samples = samples
         self.position = 0
         self.virtual_root = num_nodes
-        self.x = np.zeros(num_nodes + 1, dtype=np.float64)
-        self.stack = [{} for _ in range(num_nodes + 1)]
+        self.x = np.zeros(N, dtype=np.float64)
+        self.stack = [{} for _ in range(N)]
         self.verbosity = verbosity
         self.strict = strict
 
@@ -65,6 +67,7 @@ class DivergenceMatrix:
             u = samples[j]
             self.num_samples[u] = 1
             self.insert_root(u)
+            self.insert_branch(u, num_nodes + 1 + j)
 
     def print_state(self, msg=""):
         num_nodes = len(self.parent)
@@ -397,10 +400,17 @@ class DivergenceMatrix:
                 right = min(right, edges_right[out_order[k]])
             self.position = left = right
         assert j == M and left == self.sequence_length
+        # clear remaining things down to virtual samples
+        for u in self.samples:
+            self.push_down(u)
         out = np.zeros((len(self.samples), len(self.samples)))
-        for i in self.samples:
+        for out_i in range(len(self.samples)):
+            i = out_i + self.virtual_root + 1
             for j, z in self.stack[i].items():
-                out[i, j] = z
+                assert j > self.virtual_root 
+                assert j <= self.virtual_root + len(self.samples)
+                out_j = j - self.virtual_root - 1
+                out[out_i, out_j] = z
         return out
 
 
@@ -457,6 +467,12 @@ def verify():
             recombination_rate=0.01,
             random_seed=seed,
         )
+        t = ts.tables
+        n = t.nodes.add_row(time=-1, flags=tskit.NODE_IS_SAMPLE)
+        t.edges.add_row(parent=0, child=n, left=0, right=ts.sequence_length)
+        t.sort()
+        t.build_index()
+        ts = t.tree_sequence()
         D1 = lib_divergence_matrix(ts, mode="branch")
         D2 = divergence_matrix(ts, verbosity=0, strict=False)
         print(f"========{ts.num_trees}=============")
